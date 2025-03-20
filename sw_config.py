@@ -1,87 +1,164 @@
-import requests
-import json
+import meraki
 import os
+import json
 from datetime import datetime
+import getpass
 
-def get_switch_settings(api_key, org_name="CANADA MTN REGION", network_name="CA-HA562-HSIA"):
-    """
-    Get switch settings from Meraki Dashboard API
+# Your Meraki organization and network information
+ORG_NAME = "CANADA MTN REGION"
+NETWORK_NAME = "CA-HA562-HSIA"
+OUTPUT_DIR = "switch_configs"  # Directory to save the configurations
+
+# Create output directory if it doesn't exist
+if not os.path.exists(OUTPUT_DIR):
+    os.makedirs(OUTPUT_DIR)
+
+def main():
+    # Prompt for API key securely (input won't be visible when typing)
+    API_KEY = getpass.getpass("Enter your Meraki API key: ")
     
-    Args:
-        api_key (str): Meraki API key
-        org_name (str): Organization name to search for
-        network_name (str): Network name to get switch settings for
-        
-    Returns:
-        dict: Switch settings for the specified network
-    """
-    # Base API URL
-    base_url = "https://api.meraki.com/api/v1"
+    if not API_KEY:
+        print("API key is required. Exiting...")
+        return
     
-    # Common headers
-    headers = {
-        'X-Cisco-Meraki-API-Key': api_key,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-    }
+    # Initialize the Meraki dashboard
+    dashboard = meraki.DashboardAPI(API_KEY, output_log=False, print_console=False)
     
-    # Step 1: Get organization ID
+    print(f"Starting configuration backup for organization: {ORG_NAME}")
+    print(f"Looking for network: {NETWORK_NAME}")
+    
     try:
-        orgs_url = f"{base_url}/organizations"
-        response = requests.get(orgs_url, headers=headers)
-        response.raise_for_status()
-        organizations = response.json()
-        
+        # Get organization ID
+        organizations = dashboard.organizations.getOrganizations()
         org_id = None
+        
         for org in organizations:
-            if org['name'] == org_name:
+            if org['name'] == ORG_NAME:
                 org_id = org['id']
                 break
         
         if not org_id:
-            raise ValueError(f"Organization '{org_name}' not found")
-            
-        # Step 2: Get network ID
-        networks_url = f"{base_url}/organizations/{org_id}/networks"
-        response = requests.get(networks_url, headers=headers)
-        response.raise_for_status()
-        networks = response.json()
+            print(f"Organization '{ORG_NAME}' not found.")
+            return
         
+        print(f"Found organization ID: {org_id}")
+        
+        # Get network ID
+        networks = dashboard.organizations.getOrganizationNetworks(org_id)
         network_id = None
+        
         for network in networks:
-            if network['name'] == network_name:
+            if network['name'] == NETWORK_NAME:
                 network_id = network['id']
                 break
         
         if not network_id:
-            raise ValueError(f"Network '{network_name}' not found")
+            print(f"Network '{NETWORK_NAME}' not found in organization.")
+            return
         
-        # Step 3: Get switch settings
-        switch_settings_url = f"{base_url}/networks/{network_id}/switch/settings"
-        response = requests.get(switch_settings_url, headers=headers)
-        response.raise_for_status()
-        switch_settings = response.json()
+        print(f"Found network ID: {network_id}")
         
-        return switch_settings
+        # Get all devices in the network
+        devices = dashboard.networks.getNetworkDevices(network_id)
         
-    except requests.exceptions.RequestException as e:
-        print(f"API request error: {e}")
-        if hasattr(e, 'response') and e.response:
-            print(f"Status code: {e.response.status_code}")
-            print(f"Response: {e.response.text}")
-        return None
+        # Filter for switches only
+        switches = [device for device in devices if device['model'].startswith('MS')]
+        
+        if not switches:
+            print("No switches found in the network.")
+            return
+        
+        print(f"Found {len(switches)} switches in the network.")
+        
+        # Get and save configuration for each switch
+        for switch in switches:
+            switch_serial = switch['serial']
+            switch_name = switch.get('name', switch_serial)
+            
+            print(f"Backing up configuration for switch: {switch_name} ({switch_serial})")
+            
+            try:
+                # Get switch configuration
+                switch_config = dashboard.switch.getDeviceSwitchRoutingInterfaces(switch_serial)
+                port_configs = dashboard.switch.getDeviceSwitchPorts(switch_serial)
+                
+                # Create a comprehensive configuration object
+                full_config = {
+                    "deviceInfo": switch,
+                    "routingInterfaces": switch_config,
+                    "ports": port_configs,
+                    "backupDate": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+                
+                # Try to get additional configuration details if available
+                try:
+                    vlans = dashboard.switch.getDeviceSwitchRoutingStaticRoutes(switch_serial)
+                    full_config["staticRoutes"] = vlans
+                except:
+                    print(f"  Note: No static routes available for {switch_name}")
+                
+                try:
+                    acls = dashboard.switch.getNetworkSwitchAccessControlLists(network_id)
+                    full_config["acls"] = acls
+                except:
+                    print(f"  Note: No ACLs available for network")
+                
+                # Save the configuration to a file
+                filename = f"{OUTPUT_DIR}/{switch_name}_{switch_serial}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+                
+                with open(filename, 'w') as f:
+                    f.write(f"Configuration for {switch_name} ({switch_serial})\n")
+                    f.write(f"Backup Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"Network: {NETWORK_NAME}\n")
+                    f.write(f"Organization: {ORG_NAME}\n")
+                    f.write("=" * 80 + "\n\n")
+                    
+                    # Write device info
+                    f.write("DEVICE INFORMATION:\n")
+                    f.write("-" * 80 + "\n")
+                    for key, value in switch.items():
+                        f.write(f"{key}: {value}\n")
+                    f.write("\n")
+                    
+                    # Write routing interfaces
+                    f.write("ROUTING INTERFACES:\n")
+                    f.write("-" * 80 + "\n")
+                    f.write(json.dumps(switch_config, indent=4))
+                    f.write("\n\n")
+                    
+                    # Write port configurations
+                    f.write("PORT CONFIGURATIONS:\n")
+                    f.write("-" * 80 + "\n")
+                    f.write(json.dumps(port_configs, indent=4))
+                    f.write("\n\n")
+                    
+                    # Write static routes if available
+                    if "staticRoutes" in full_config:
+                        f.write("STATIC ROUTES:\n")
+                        f.write("-" * 80 + "\n")
+                        f.write(json.dumps(full_config["staticRoutes"], indent=4))
+                        f.write("\n\n")
+                    
+                    # Write ACLs if available
+                    if "acls" in full_config:
+                        f.write("ACCESS CONTROL LISTS:\n")
+                        f.write("-" * 80 + "\n")
+                        f.write(json.dumps(full_config["acls"], indent=4))
+                        f.write("\n\n")
+                
+                print(f"  Configuration saved to {filename}")
+                
+            except Exception as e:
+                print(f"  Error getting configuration for {switch_name}: {str(e)}")
+        
+        print("Configuration backup complete!")
+        
+    except meraki.APIError as e:
+        print(f"Meraki API Error: {str(e)}")
+        print("Please check if your API key is correct and has sufficient permissions.")
+    except Exception as e:
+        print(f"Error: {str(e)}")
 
 if __name__ == "__main__":
-    # Get API key from environment variable for security
-    api_key = os.environ.get("MERAKI_API_KEY")
+    main()
     
-    if not api_key:
-        print("Error: MERAKI_API_KEY environment variable not set")
-        print("Set it with: export MERAKI_API_KEY='your-api-key'")
-        exit(1)
-    
-    # Get switch settings
-    switch_settings = get_switch_settings(api_key)
-    
-    if switch_settings:
-        print(json.dumps(switch_settings, indent=2))
