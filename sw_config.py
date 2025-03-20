@@ -3,7 +3,7 @@ import json
 import os
 from datetime import datetime
 
-def get_switch_settings(api_key, org_name="Knoxs Data", network_name="SoHo"):
+def get_switch_settings(api_key, org_name="CANADA MTN REGION", network_name="CA-HA562-HSIA"):
     """
     Get switch settings from Meraki Dashboard API
     
